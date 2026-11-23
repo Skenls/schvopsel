@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 import psycopg
 from PIL import UnidentifiedImageError
 
-from .ocr import GeminiReader, MODELS, OCRUnavailable, gemini_client, locate_page, read_lessons
+from .ocr import GeminiReader, OCRUnavailable, configured_models, gemini_client, locate_page, read_lessons
 from .schedule_store import ensure_schedule_table, finish_import, next_import, save_schedule, saved_transcriptions
 from .timetable import MINSK, schedule_days
 
@@ -214,8 +214,10 @@ async def run(args):
             loop = asyncio.get_running_loop()
             next_scan = 0.0
             early_retry_used = False
+            models = configured_models(args.model)
+            LOG.info("Порядок моделей Gemini: %s", ", ".join(models))
             with gemini_client(os.environ["GEMINI_API_KEY"]) as model_client:
-                reader = PhotoReader(os.getenv("TARGET_GROUP", "11П"), GeminiReader(model_client, args.model or MODELS))
+                reader = PhotoReader(os.getenv("TARGET_GROUP", "11П"), GeminiReader(model_client, models))
                 while True:
                     job = None if args.once else next_import(conn)
                     if job is None and not published.is_set() and loop.time() < next_scan:

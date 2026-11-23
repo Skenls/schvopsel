@@ -31,6 +31,7 @@ services:
     environment:
       <<: *database-env
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODELS: ${GEMINI_MODELS:-}
       TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
       TELEGRAM_SESSION_PATH: /run/telegram/channel_listener.session

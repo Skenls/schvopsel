@@ -39,6 +39,8 @@ docker compose -f compose.yaml -f compose.edge.yaml --profile bot --profile sche
 
 Для загрузки расписания заполните `GEMINI_API_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `CHANNEL_USERNAME` (числовой ID канала), `CHANNEL_TARGET` (имя канала) и `TARGET_GROUP`. Укажите авторизованную пользовательскую сессию через `TELEGRAM_SESSION_PATH`. Дайте доступ к файлу только владельцу или сервисному аккаунту. Профиль `schedule` подключает сессию только для чтения. Укажите `SCHEDULE_SOURCE=telegram`, чтобы веб показывал расписание из канала.
 
+`GEMINI_MODELS` позволяет задать приоритет моделей через запятую. Оставьте строку пустой для встроенного порядка. Для OCR требуются входные изображения и структурированный текстовый вывод. Активные лимиты проекта видны в [Google AI Studio](https://aistudio.google.com/rate-limit).
+
 ```sh
 docker compose --profile bot --profile schedule up -d --build --wait
 ```

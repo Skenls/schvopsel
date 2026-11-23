@@ -18,9 +18,14 @@ from PIL import Image, ImageFilter, ImageOps
 from pydantic import BaseModel, ValidationError
 
 LOG = logging.getLogger(__name__)
-MODELS = ("gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash")
 WEEKDAYS = ("понедельник", "вторник", "сред", "четверг", "пятниц", "суббот", "воскресень")
 TICKS = {"✓", "√", "✔", "V", "v"}
+
+
+def configured_models(cli_models=None):
+    names = cli_models or os.getenv("GEMINI_MODELS", "").split(",")
+    return tuple(dict.fromkeys(name.strip() for name in names if name.strip())) or MODELS
 
 
 class Header(BaseModel):
@@ -296,11 +301,21 @@ def verify_room_grid(lessons: list[dict], group: str, image: bytes, infer) -> li
         columns.paste(rooms, (numbers_width + 8, 0))
         zoom = ImageOps.autocontrast(columns).filter(ImageFilter.UnsharpMask(radius=1, percent=85))
         numbers_view = jpeg(zoom, 1.8)
-    result = infer(RoomGrid, prompt, image, numbers_view)
-    rooms = {(row.number, row.subgroup): room_code(row.room) for row in result.rooms}
     expected = {(row["lesson_num"], row["subgroup"]) for row in lessons}
-    if not same_group(result.group_label, group) or rooms.keys() != expected or len(rooms) != len(result.rooms):
-        raise ValueError("Printed numbers could not be verified")
+
+    def checked_rooms(result):
+        if not same_group(result.group_label, group):
+            raise ValueError("RoomGrid did not identify the requested group")
+        rooms = {(row.number, row.subgroup): room_code(row.room) for row in result.rooms}
+        if rooms.keys() != expected or len(rooms) != len(result.rooms):
+            raise ValueError(
+                f"RoomGrid differs from transcription: missing {sorted(expected - rooms.keys())}, "
+                f"extra {sorted(rooms.keys() - expected)}, duplicates {len(result.rooms) - len(rooms)}"
+            )
+        return rooms
+
+    result = infer(RoomGrid, prompt, image, numbers_view, check=checked_rooms)
+    rooms = checked_rooms(result)
     return [row | {"auditorium": rooms[row["lesson_num"], row["subgroup"]]} for row in lessons]
 
 
@@ -343,15 +358,22 @@ def read_lessons(page: Page, group: str, infer) -> list[dict]:
     w, h = page.image.size
     right = page.image.crop((round(w * .39), 0, w, h))
     views.append((jpeg(page.image), jpeg(right, 1.45)))
-    for images in views:
-        parsed = infer(Transcription, prompt, *images)
+
+    def checked_lessons(parsed):
         if not (same_group(parsed.group_label, group) and parsed.complete):
-            continue
+            raise ValueError("Transcription did not identify a complete table for the requested group")
+        rows = [row.model_copy(update={"room": None}) for row in parsed.rows]
+        lessons = lessons_from_rows(rows)
+        if not lessons:
+            raise ValueError("Transcription contains no lessons")
+        return lessons
+
+    for images in views:
+        parsed = infer(Transcription, prompt, *images, check=checked_lessons)
         try:
-            rows = [row.model_copy(update={"room": None}) for row in parsed.rows]
-            return verify_room_grid(lessons_from_rows(rows), group, images[0], infer)
-        except ValueError:
-            LOG.warning("Строки группы %s не прошли проверку", group)
+            return verify_room_grid(checked_lessons(parsed), group, images[0], infer)
+        except ValueError as exc:
+            LOG.warning("Строки группы %s не прошли проверку: %s", group, exc)
     if page.box is not None:
         raise ValueError("Не удалось полностью прочитать строки найденной группы")
     return []
@@ -377,7 +399,7 @@ class GeminiReader:
         self.models = tuple(models)
         self.unavailable = set()
 
-    def __call__(self, schema, prompt, *images):
+    def __call__(self, schema, prompt, *images, check=None):
         from google.genai import errors, types
         from httpx2 import TransportError
 
@@ -387,6 +409,7 @@ class GeminiReader:
             media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
         )
         candidates = [model for model in self.models if model not in self.unavailable]
+        rejected = None
         for delay in (0, 2, 6):
             if not candidates:
                 break
@@ -398,6 +421,13 @@ class GeminiReader:
                 try:
                     response = self.client.models.generate_content(model=model, contents=[*parts, prompt], config=config)
                     result = schema.model_validate_json(response.text or "")
+                    if check is not None:
+                        try:
+                            check(result)
+                        except ValueError as exc:
+                            rejected = result
+                            LOG.info("Gemini %s (%s): %s", model, schema.__name__, exc)
+                            continue
                     LOG.info("OCR %s: %s", schema.__name__, model)
                     return result
                 except errors.APIError as exc:
@@ -411,6 +441,8 @@ class GeminiReader:
                     LOG.warning("Gemini %s (%s): обрыв связи", model, schema.__name__)
                 except ValidationError:
                     LOG.warning("Gemini %s (%s): некорректный ответ", model, schema.__name__)
+            if rejected is not None:
+                return rejected
             candidates = transient
         raise OCRUnavailable(
             f"Gemini не завершил этап {schema.__name__}",
@@ -427,9 +459,9 @@ def gemini_client(api_key: str):
     ))
 
 
-def parse_image_with_gemini(image_bytes: bytes, target_group: str, api_key: str, models=MODELS) -> dict:
+def parse_image_with_gemini(image_bytes: bytes, target_group: str, api_key: str, models=None) -> dict:
     with gemini_client(api_key) as client:
-        return parse_image(image_bytes, target_group, GeminiReader(client, models))
+        return parse_image(image_bytes, target_group, GeminiReader(client, configured_models(models)))
 
 
 def main():
@@ -442,7 +474,7 @@ def main():
     key = os.getenv("GEMINI_API_KEY")
     if not key:
         cli.error("Укажите GEMINI_API_KEY в окружении")
-    result = parse_image_with_gemini(args.image.read_bytes(), args.group, key, args.model or MODELS)
+    result = parse_image_with_gemini(args.image.read_bytes(), args.group, key, args.model)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

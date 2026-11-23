@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 from google.genai.errors import ClientError
 
 from backend.ocr import (
-    GeminiReader, Header, Location, RoomGrid, RoomRow, Row, Transcription,
+    MODELS, GeminiReader, Header, Location, RoomGrid, RoomRow, Row, Transcription, configured_models,
     lessons_from_rows, level_group_crop, parse_image, printed_day, straight_group_crops, verify_room_grid,
 )
 
@@ -29,6 +29,29 @@ class OCRTests(unittest.TestCase):
         self.assertEqual(printed_day("23.11.26г.", "ПОНЕДЕЛЬНИК"), date(2026, 11, 23))
         self.assertIsNone(printed_day("23.11.26г.", "ВТОРНИК"))
         self.assertIsNone(printed_day("31.11.26г."))
+
+    def test_models_from_environment_keep_priority_and_cli_overrides(self):
+        with patch.dict("os.environ", {"GEMINI_MODELS": "model-b, model-a, model-b"}):
+            self.assertEqual(configured_models(), ("model-b", "model-a"))
+            self.assertEqual(configured_models(["model-c"]), ("model-c",))
+        with patch.dict("os.environ", {"GEMINI_MODELS": ""}):
+            self.assertEqual(configured_models(), MODELS)
+
+    def test_schema_valid_but_unusable_transcription_and_grid_try_next_model(self):
+        unusable = Transcription(group_label="11П", complete=False, rows=[])
+        usable = Transcription(group_label="11П", complete=True, rows=[row(2, "Физика", None)])
+        wrong_grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=3, subgroup=0, room="404")])
+        matching_grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=2, subgroup=0, room="502")])
+        client = Mock()
+        client.models.generate_content.side_effect = [
+            SimpleNamespace(text=item.model_dump_json())
+            for item in (self.location, unusable, usable, wrong_grid, matching_grid)
+        ]
+        result = parse_image(self.image, "11П", GeminiReader(client, ("first", "second")))
+        self.assertEqual([(lesson["lesson_num"], lesson["auditorium"]) for lesson in result["lessons"]],
+                         [(2, "502")])
+        self.assertEqual([call.kwargs["model"] for call in client.models.generate_content.call_args_list],
+                         ["first", "first", "second", "first", "second"])
 
     def test_crops_exact_group_and_rejects_wrong_group(self):
         wrong = Transcription(group_label="13П", complete=True, rows=[row(1, "Математика")])

@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from backend.ocr import OCRUnavailable
 from backend.schedule_sync import PhotoReader, select_schedules
 from backend.timetable import MINSK, schedule_days, schedule_state
 
@@ -18,6 +19,23 @@ async def posts(*albums):
 
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unavailable_ocr_on_first_sheet_does_not_discard_album(self):
+        inspect = AsyncMock(return_value=(TOMORROW, True))
+        transcribe = AsyncMock(side_effect=[OCRUnavailable("busy"), [LESSON]])
+        actual = [
+            item async for item in select_schedules(
+                posts((42, 41)), TODAY, inspect, transcribe, targets=(TOMORROW,),
+            )
+        ]
+        self.assertEqual(actual, [(TOMORROW, 41, [LESSON])])
+
+    async def test_all_models_blocked_ends_scan_without_downloading_more_sheets(self):
+        inspect = AsyncMock(side_effect=OCRUnavailable("quota", blocked=True))
+        with self.assertRaises(OCRUnavailable):
+            async for _ in select_schedules(posts((42, 41), (40,)), TODAY, inspect, AsyncMock()):
+                self.fail("No rows could be read")
+        self.assertEqual(inspect.call_count, 1)
+
     async def test_manual_next_day_skips_today_and_reads_both_pages(self):
         inspect = AsyncMock(side_effect=[(TODAY, True), (TOMORROW, False), (TOMORROW, True)])
         transcribe = AsyncMock(return_value=[LESSON])

@@ -2,7 +2,7 @@ import io
 import unittest
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image, ImageDraw
 from google.genai.errors import ClientError
@@ -108,3 +108,16 @@ class OCRTests(unittest.TestCase):
         self.assertEqual(reader(Location, "date", b"jpeg"), self.location)
         self.assertEqual([call.kwargs["model"] for call in client.models.generate_content.call_args_list],
                          ["quota", "missing", "working", "working"])
+
+    def test_retry_transient_model_after_fallback_without_retrying_quota(self):
+        client = Mock()
+        client.models.generate_content.side_effect = [
+            ClientError(503, {"error": {"code": 503}}),
+            ClientError(429, {"error": {"code": 429}}),
+            SimpleNamespace(text=self.location.model_dump_json()),
+        ]
+        with patch("backend.ocr.sleep") as wait:
+            self.assertEqual(GeminiReader(client, ("busy", "quota"))(Location, "date", b"jpeg"), self.location)
+        wait.assert_called_once_with(2)
+        self.assertEqual([call.kwargs["model"] for call in client.models.generate_content.call_args_list],
+                         ["busy", "quota", "busy"])

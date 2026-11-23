@@ -11,6 +11,7 @@ from datetime import date
 from heapq import nlargest
 from itertools import groupby
 from pathlib import Path
+from time import sleep
 from typing import Literal
 
 from PIL import Image, ImageFilter, ImageOps
@@ -365,7 +366,9 @@ def parse_image(image_bytes: bytes, target_group: str, infer) -> dict:
 
 
 class OCRUnavailable(RuntimeError):
-    pass
+    def __init__(self, message, *, blocked=False):
+        super().__init__(message)
+        self.blocked = blocked
 
 
 class GeminiReader:
@@ -379,28 +382,40 @@ class GeminiReader:
         from httpx2 import TransportError
 
         parts = [types.Part.from_bytes(data=image, mime_type="image/jpeg") for image in images]
-        for model in self.models:
-            if model in self.unavailable:
-                continue
-            try:
-                response = self.client.models.generate_content(
-                    model=model,
-                    contents=[*parts, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json", response_json_schema=schema.model_json_schema(),
-                        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
-                    ),
-                )
-                result = schema.model_validate_json(response.text or "")
-                LOG.info("OCR %s: %s", schema.__name__, model)
-                return result
-            except errors.APIError as exc:
-                if exc.code in (401, 403, 404, 429):
-                    self.unavailable.add(model)
-                LOG.warning("Gemini %s: HTTP %s, переходим к следующей модели", model, exc.code)
-            except (ValidationError, TransportError):
-                LOG.warning("Gemini %s: некорректный ответ или обрыв связи", model)
-        raise OCRUnavailable("Ни одна модель Gemini не вернула пригодный ответ")
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json", response_json_schema=schema.model_json_schema(),
+            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+        )
+        candidates = [model for model in self.models if model not in self.unavailable]
+        for delay in (0, 2, 6):
+            if not candidates:
+                break
+            if delay:
+                LOG.info("Повторяю этап Gemini %s через %s с", schema.__name__, delay)
+                sleep(delay)
+            transient = []
+            for model in candidates:
+                try:
+                    response = self.client.models.generate_content(model=model, contents=[*parts, prompt], config=config)
+                    result = schema.model_validate_json(response.text or "")
+                    LOG.info("OCR %s: %s", schema.__name__, model)
+                    return result
+                except errors.APIError as exc:
+                    if exc.code in (401, 403, 404, 429):
+                        self.unavailable.add(model)
+                    elif exc.code in (408, 500, 502, 503, 504):
+                        transient.append(model)
+                    LOG.warning("Gemini %s (%s): HTTP %s", model, schema.__name__, exc.code)
+                except TransportError:
+                    transient.append(model)
+                    LOG.warning("Gemini %s (%s): обрыв связи", model, schema.__name__)
+                except ValidationError:
+                    LOG.warning("Gemini %s (%s): некорректный ответ", model, schema.__name__)
+            candidates = transient
+        raise OCRUnavailable(
+            f"Gemini не завершил этап {schema.__name__}",
+            blocked=all(model in self.unavailable for model in self.models),
+        )
 
 
 def gemini_client(api_key: str):
@@ -408,7 +423,7 @@ def gemini_client(api_key: str):
     from google.genai import types
 
     return genai.Client(api_key=api_key, http_options=types.HttpOptions(
-        timeout=45000, retry_options=types.HttpRetryOptions(attempts=1),
+        timeout=20000, retry_options=types.HttpRetryOptions(attempts=1),
     ))
 
 

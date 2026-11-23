@@ -15,8 +15,7 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
-      app:
-        condition: service_healthy
+      - app
     restart: unless-stopped
 
 volumes:

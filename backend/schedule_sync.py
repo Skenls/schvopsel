@@ -40,9 +40,20 @@ async def select_schedules(posts, today, inspect, transcribe, *, targets=None):
     manual = targets is not None
     targets = targets if manual else schedule_days(today)
     found = set()
+    failed = {}
     async for photos in posts:
-        pages = [(photo, *await inspect(photo)) for photo in photos]
-        if all(day and day < today for _, day, _ in pages):
+        pages = []
+        for photo in photos:
+            try:
+                pages.append((photo, *await inspect(photo)))
+            except OCRUnavailable as exc:
+                if exc.blocked:
+                    raise
+                failed[None] = exc
+                LOG.warning("Gemini временно не прочитал заголовок фото %s", photo.id)
+        if not pages:
+            raise failed[None]
+        if len(pages) == len(photos) and all(day and day < today for _, day, _ in pages):
             LOG.info("Встречены листы за %s, поиск остановлен", max(day for _, day, _ in pages))
             break
         # A matching crop is stronger than a fallback search of a full page.
@@ -51,6 +62,12 @@ async def select_schedules(posts, today, inspect, transcribe, *, targets=None):
                 continue
             try:
                 lessons = await transcribe(photo)
+            except OCRUnavailable as exc:
+                if exc.blocked:
+                    raise
+                failed[day] = exc
+                LOG.warning("Gemini временно не прочитал уроки на фото %s", photo.id)
+                continue
             except ValueError:
                 LOG.warning("Не удалось полностью прочитать группу на фото %s", photo.id)
                 continue
@@ -61,6 +78,10 @@ async def select_schedules(posts, today, inspect, transcribe, *, targets=None):
             break
         if not manual and today in found and found.intersection(targets[1:]):
             break
+    if (missing := set(targets) - found):
+        for day, error in failed.items():
+            if day is None or day in missing:
+                raise error
 
 
 class PhotoReader:
@@ -192,6 +213,7 @@ async def run(args):
             LOG.info("Синхронизатор запущен. Проверка канала каждые %s с и при новом фото", args.interval)
             loop = asyncio.get_running_loop()
             next_scan = 0.0
+            early_retry_used = False
             with gemini_client(os.environ["GEMINI_API_KEY"]) as model_client:
                 reader = PhotoReader(os.getenv("TARGET_GROUP", "11П"), GeminiReader(model_client, args.model or MODELS))
                 while True:
@@ -206,16 +228,28 @@ async def run(args):
                         # Give the remaining sheets in a Telegram album time to arrive.
                         await asyncio.sleep(2)
                         published.clear()
+                    retry = False
                     try:
                         result = await scan(conn, client, channel, reader, manual=job[1] if job else None)
-                    except (OCRUnavailable, RPCError, OSError) as exc:
+                    except OCRUnavailable:
+                        LOG.warning("Gemini не смог завершить импорт. Проверенные записи сохранены.")
+                        result = "Gemini временно не смог завершить импорт. Уже проверенное расписание сохранено."
+                        if args.once:
+                            return 1
+                        retry = True
+                    except (RPCError, OSError) as exc:
                         LOG.warning("Синхронизация прервана: %s", type(exc).__name__)
                         result = "Импорт не завершился. Подробности в логах schedule-worker."
                         if args.once:
                             return 1
                     if job:
                         finish_import(conn, job[0], result)
-                    else:
+                    if retry and not early_retry_used:
+                        early_retry_used = True
+                        next_scan = min(next_scan, loop.time() + 90) if job else loop.time() + 90
+                        LOG.info("Следующая автоматическая попытка не позже чем через 90 с")
+                    elif not job:
+                        early_retry_used = False
                         next_scan = loop.time() + args.interval
                     if args.once:
                         return 0

@@ -18,14 +18,8 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
     depends_on:
-      db:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
-      interval: 15s
-      start_period: 15s
-      timeout: 3s
-      retries: 5
+      db-ready:
+        condition: service_completed_successfully
     restart: unless-stopped
   schedule-worker:
     profiles: ["schedule"]
@@ -33,6 +27,7 @@ services:
       context: .
       target: schedule-worker
     image: schvopsel-ocr:local
+    cpus: 0.4
     environment:
       <<: *database-env
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
@@ -50,8 +45,8 @@ services:
         bind:
           create_host_path: false
     depends_on:
-      db:
-        condition: service_healthy
+      db-ready:
+        condition: service_completed_successfully
     restart: unless-stopped
   telegram-bot:
     profiles: ["bot"]
@@ -64,8 +59,8 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       MAIN_ADMIN_TELEGRAM_ID: ${MAIN_ADMIN_TELEGRAM_ID:-}
     depends_on:
-      db:
-        condition: service_healthy
+      db-ready:
+        condition: service_completed_successfully
     restart: unless-stopped
   db:
     build:
@@ -81,12 +76,23 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-demo}
     volumes:
       - data:/var/lib/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
-      interval: 15s
-      start_period: 15s
-      timeout: 3s
-      retries: 10
     restart: unless-stopped
+  db-ready:
+    image: schvopsel-db:local
+    environment:
+      <<: *database-env
+      PGCONNECT_TIMEOUT: 2
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for attempt in $$(seq 1 45); do
+          if psql -w -tAc 'SELECT 1' >/dev/null 2>&1; then
+            exit 0
+          fi
+          sleep 2
+        done
+        psql -w -tAc 'SELECT 1'
+    depends_on:
+      - db
 volumes:
   data:

@@ -154,7 +154,7 @@ function Board({ mode, initData, profile, botUrl, selectProfile, onAccess, sound
       finally {
         pending = false
       }
-      if (!controller.signal.aborted && !document.hidden) timer = setTimeout(refresh, 1400)
+      if (!controller.signal.aborted && !document.hidden) timer = setTimeout(refresh, 5000)
     }
     function visibility() {
       clearTimeout(timer)

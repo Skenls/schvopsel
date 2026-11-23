@@ -8,6 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import date
+from heapq import nlargest
 from itertools import groupby
 from pathlib import Path
 from typing import Literal
@@ -128,19 +129,32 @@ def locate_page(image_bytes: bytes, group: str, infer) -> Page:
     return Page(image, day, box)
 
 
-def straight_group_crops(image: Image.Image, top: int, bottom: int) -> list[Image.Image]:
+def straight_group_crops(image: Image.Image, top: int, bottom: int, *, leveled=False) -> list[Image.Image]:
     """Tighten a near-horizontal group crop to the printed table borders."""
     w, h = image.size
     if w < 40 or h < 30:
         return []
     pixels = image.convert("L").load()
     columns = [round(w * x / 100) for x in range(7, 86, 2)]
+    group_columns = [round(w * x / 100) for x in range(3, 15, 2)]
+    lesson_columns = [round(w * x / 100) for x in range(16, 72, 2)]
+
+    def rule_strength(y, sample):
+        return sum(
+            pixels[x, y - 5] + pixels[x, y + 5] - 2 * min(pixels[x, y + dy] for dy in range(-2, 3)) > 24
+            for x in sample
+        ) / len(sample)
+
     scores = []
     for y in range(5, h - 5):
-        hits = sum(pixels[x, y - 4] + pixels[x, y + 4] - 2 * pixels[x, y] > 44 for x in columns)
-        scores.append((hits / len(columns), y))
+        if leveled:
+            score = rule_strength(y, group_columns) * rule_strength(y, lesson_columns)
+        else:
+            score = sum(pixels[x, y - 4] + pixels[x, y + 4] - 2 * pixels[x, y] > 44 for x in columns) / len(columns)
+        scores.append((score, y))
     peaks = []
-    for strong, rows in groupby(scores, lambda row: row[0] > .51):
+    threshold = .42 if leveled else .51
+    for strong, rows in groupby(scores, lambda row: row[0] > threshold):
         if not strong:
             continue
         score, y = max(rows)
@@ -151,13 +165,42 @@ def straight_group_crops(image: Image.Image, top: int, bottom: int) -> list[Imag
             peaks.append((y, score))
     pairs = [(a, b) for (a, _), (b, _) in zip(peaks, peaks[1:]) if 24 <= b - a <= (bottom - top) * 1.6]
     def distance(pair):
-        return abs(pair[0] - top) + abs(pair[1] - bottom)
+        return (2 if leveled else 1) * abs(pair[0] - top) + abs(pair[1] - bottom)
 
     return [
         image.crop((0, max(0, first - 3), w, min(h, last + 4)))
         for first, last in sorted(pairs, key=distance)[:2]
         if distance((first, last)) <= max(90, bottom - top)
     ]
+
+
+def level_group_crop(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    if width < 100 or height < 55:
+        return image
+    pixels = image.convert("L").load()
+    columns = range(round(width * .10), round(width * .85), max(2, width // 48))
+    margin = round(width * .06) + 4
+    if height <= 2 * margin:
+        return image
+
+    def line_score(slope):
+        samples = [(x, round((x - width / 2) * slope)) for x in columns]
+        rows = (
+            sum(max(0, min(80, pixels[x, y + shift - 3] + pixels[x, y + shift + 3]
+                           - 2 * pixels[x, y + shift])) for x, shift in samples)
+            for y in range(margin, height - margin)
+        )
+        return sum(nlargest(6, rows))
+
+    flat = line_score(0)
+    score, slope = max((line_score(step * .015), step * .015) for step in range(-8, 9) if step)
+    if score <= flat * 1.08:
+        return image
+    return image.transform(
+        image.size, Image.Transform.AFFINE, (1, 0, 0, slope, 1, -slope * width / 2),
+        Image.Resampling.BICUBIC, fillcolor="white",
+    )
 
 
 def group_crops(page: Page) -> list[Image.Image]:
@@ -174,8 +217,11 @@ def group_crops(page: Page) -> list[Image.Image]:
         max(0, round((x0 - 20) * w / 1000)), start_y,
         min(w, round((x1 + 65) * w / 1000)), min(h, round((y1 + pad) * h / 1000)),
     ))
-    tight = straight_group_crops(crop, round(y0 * h / 1000) - start_y, round(y1 * h / 1000) - start_y)
-    return [part for part in tight if part.height < crop.height * .85] + [crop]
+    aligned = level_group_crop(crop)
+    tight = straight_group_crops(
+        aligned, round(y0 * h / 1000) - start_y, round(y1 * h / 1000) - start_y, leveled=aligned is not crop,
+    )
+    return [part for part in tight if part.height < crop.height * .85] + [aligned]
 
 
 def room_code(room: str | None) -> str:
@@ -224,8 +270,10 @@ def verify_room_grid(lessons: list[dict], group: str, image: bytes, infer) -> li
         return lessons
     prompt = f"""
 Независимо сверь ТОЛЬКО сетку номеров «№ ур» и «Ауд» в группе «{group}».
-Первое изображение — исходный фрагмент; второе показывает ту же область со
-столбцом «Ауд» крупнее. Горизонтальные строки в двух изображениях совпадают.
+Первое изображение — исходный фрагмент. Во втором слева увеличены колонки
+«№ гр.» и «№ ур», справа увеличена область с «Ауд». Строки обеих частей второго
+изображения лежат на одинаковой высоте. Читай каждую видимую цифру номера
+отдельно, даже если следующие друг за другом уроки имеют одинаковый кабинет.
 Сначала найди точную надпись группы. Для каждого занятия укажи напечатанный
 номер урока, subgroup (0 — единственная строка, 1 — верхняя, 2 — нижняя)
 и room из колонки «Ауд». Считывай цифры строго по горизонтали относительно
@@ -240,8 +288,13 @@ def verify_room_grid(lessons: list[dict], group: str, image: bytes, infer) -> li
 """
     with Image.open(io.BytesIO(image)) as original:
         w, h = original.size
-        zoom = original.crop((round(w * .38), 0, round(w * .73), h))
-        numbers_view = jpeg(ImageOps.autocontrast(zoom.convert("L")), 1.8)
+        numbers_width = round(w * .28)
+        rooms = original.crop((round(w * .32), 0, round(w * .76), h)).convert("L")
+        columns = Image.new("L", (numbers_width + rooms.width + 8, h), 255)
+        columns.paste(original.crop((0, 0, numbers_width, h)).convert("L"), (0, 0))
+        columns.paste(rooms, (numbers_width + 8, 0))
+        zoom = ImageOps.autocontrast(columns).filter(ImageFilter.UnsharpMask(radius=1, percent=85))
+        numbers_view = jpeg(zoom, 1.8)
     result = infer(RoomGrid, prompt, image, numbers_view)
     rooms = {(row.number, row.subgroup): room_code(row.room) for row in result.rooms}
     expected = {(row["lesson_num"], row["subgroup"]) for row in lessons}
@@ -275,7 +328,8 @@ def read_lessons(page: Page, group: str, infer) -> list[dict]:
   строки. У одинакового предмета подгрупп часто разные кабинеты.
   Не дублируй нижний кабинет в верхней строке.
 - teacher — видимая фамилия с инициалами, или null, если имя не прочитать.
-- Если дисциплина или кабинет присутствуют, но не читаются, kind=unclear.
+- Если дисциплина не читается, kind=unclear. Если не уверен только в номере
+  кабинета, запиши дисциплину как обычно, а room оставь null.
 """
     crops = group_crops(page)
     views = []
@@ -293,7 +347,8 @@ def read_lessons(page: Page, group: str, infer) -> list[dict]:
         if not (same_group(parsed.group_label, group) and parsed.complete):
             continue
         try:
-            return verify_room_grid(lessons_from_rows(parsed.rows), group, images[0], infer)
+            rows = [row.model_copy(update={"room": None}) for row in parsed.rows]
+            return verify_room_grid(lessons_from_rows(rows), group, images[0], infer)
         except ValueError:
             LOG.warning("Строки группы %s не прошли проверку", group)
     if page.box is not None:

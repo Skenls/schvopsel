@@ -9,8 +9,8 @@ from aiogram.exceptions import AiogramError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from backend.crew_store import connect
-from backend.schedule_store import read_schedule
+from backend.crew_store import bot_actor, connect
+from backend.schedule_store import import_result, read_schedule, request_import
 from backend.timetable import MINSK, SATURDAY, WEEKDAY, schedule_days
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ SUBGROUP_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="Вся группа", callback_data="set_sub_0")],
 ])
 ACCESS_DENIED = "У вас нет доступа к расписанию."
+waiting_imports: set[int] = set()
 
 
 def subgroup_title(subgroup: int) -> str:
@@ -119,6 +120,47 @@ async def send_schedule(message: Message, command: CommandObject):
         read_for_account, message.from_user.id, datetime.now(MINSK).date(), command.command == "nextday",
     )
     await message.answer(text, parse_mode=None)
+
+
+def queue_for_admin(telegram_id, owner, next_day):
+    with connect("prod") as conn:
+        actor = bot_actor(conn, telegram_id, owner)
+        return request_import(conn, next_day) if actor and actor["admin"] else None
+
+
+def check_import(job):
+    with connect("prod") as conn:
+        return import_result(conn, job)
+
+
+@router.message(Command("parse", "parsenext"))
+async def parse_schedule(message: Message, command: CommandObject, owner_id: int):
+    if message.from_user is None:
+        return
+    job = await asyncio.to_thread(
+        queue_for_admin, message.from_user.id, owner_id, command.command == "parsenext",
+    )
+    if job is None:
+        await message.answer("Команда доступна только админам.")
+        return
+    if job in waiting_imports:
+        await message.answer("Поиск расписания уже идёт.")
+        return
+    waiting_imports.add(job)
+    try:
+        status = await message.answer("Ищу расписание в канале…")
+        try:
+            async with asyncio.timeout(180):
+                while not (result := await asyncio.to_thread(check_import, job)):
+                    await asyncio.sleep(4)
+        except TimeoutError:
+            result = "Импорт ещё не завершился. Проверьте логи schedule-worker."
+        except psycopg.Error as exc:
+            logger.warning("Schedule import status unavailable (%s)", type(exc).__name__)
+            result = "Не удалось получить статус импорта. Проверьте логи schedule-worker."
+        await status.edit_text(result, parse_mode=None)
+    finally:
+        waiting_imports.remove(job)
 
 
 def due_bell(now: datetime) -> tuple[int, str] | None:

@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from backend.schedule_sync import select_schedules
+from backend.schedule_sync import PhotoReader, select_schedules
 from backend.timetable import MINSK, schedule_days, schedule_state
 
 TODAY = date(2026, 11, 23)
@@ -18,6 +18,24 @@ async def posts(*albums):
 
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_next_day_skips_today_and_reads_both_pages(self):
+        inspect = AsyncMock(side_effect=[(TODAY, True), (TOMORROW, False), (TOMORROW, True)])
+        transcribe = AsyncMock(return_value=[LESSON])
+        actual = [
+            item async for item in select_schedules(
+                posts((44,), (43, 42), (41,)), TODAY, inspect, transcribe, targets=(TOMORROW,),
+            )
+        ]
+        self.assertEqual(actual, [(TOMORROW, 42, [LESSON])])
+        self.assertEqual([call.args[0].id for call in transcribe.call_args_list], [42])
+
+    async def test_saved_transcription_needs_no_image_download(self):
+        photo = SimpleNamespace(id=42, download_media=AsyncMock())
+        reader = PhotoReader("11П", None)
+        reader.lessons[42] = [LESSON]
+        self.assertEqual(await reader.transcribe(photo), [LESSON])
+        photo.download_media.assert_not_called()
+
     async def test_reads_second_sheet_and_stops_on_stale_printed_date(self):
         inspect = AsyncMock(side_effect=[(TODAY, False), (TODAY, True), (BEFORE, True)])
         transcribe = AsyncMock(return_value=[LESSON])

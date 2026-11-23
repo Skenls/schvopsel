@@ -9,7 +9,7 @@ from google.genai.errors import ClientError
 
 from backend.ocr import (
     GeminiReader, Header, Location, RoomGrid, RoomRow, Row, Transcription,
-    lessons_from_rows, parse_image, printed_day, straight_group_crops, verify_room_grid,
+    lessons_from_rows, level_group_crop, parse_image, printed_day, straight_group_crops, verify_room_grid,
 )
 
 
@@ -70,6 +70,12 @@ class OCRTests(unittest.TestCase):
         self.assertEqual([x["auditorium"] for x in verify_room_grid(lessons, "11П", self.image, Mock(return_value=audit))],
                          ["410", "305"])
 
+    def test_unreadable_room_in_first_pass_uses_the_independent_grid(self):
+        subject = Transcription(group_label="11П", complete=True, rows=[row(2, "Физика", "3/3")])
+        grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=2, subgroup=0, room="ч/з")])
+        result = parse_image(self.image, "11П", Mock(side_effect=[self.location, subject, grid]))
+        self.assertEqual(result["lessons"][0]["auditorium"], "ч/з")
+
     def test_tight_crop_uses_horizontal_borders_despite_offset_hint(self):
         image = Image.new("L", (340, 170), "white")
         draw = ImageDraw.Draw(image)
@@ -78,6 +84,16 @@ class OCRTests(unittest.TestCase):
         crop, = straight_group_crops(image, 36, 139)
         self.assertEqual(crop.size, (340, 82))
         self.assertEqual(crop.getpixel((200, 3)), 0)
+
+    def test_slanted_table_rules_are_leveled_before_cropping(self):
+        image = Image.new("L", (320, 160), "white")
+        draw = ImageDraw.Draw(image)
+        for y in (38, 78, 117):
+            draw.line((0, y, 319, y + 24), fill=0, width=3)
+        leveled = level_group_crop(image)
+        for y in (50, 90, 129):
+            with self.subTest(y=y):
+                self.assertLess(sum(leveled.getpixel((x, y)) for x in range(20, 300)) / 280, 45)
 
     def test_fallback_on_quota_and_model_unavailability(self):
         client = Mock()

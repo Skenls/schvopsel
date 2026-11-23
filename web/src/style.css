@@ -69,7 +69,8 @@ h1 { font: 700 clamp(36px, 4.4vw, 61px)/.93 var(--serif); margin: 0; }
 .dateline { color: var(--muted); font-size: 13px; display: flex; gap: 8px; align-items: center; text-transform: capitalize; white-space: nowrap; padding-bottom: 3px; }
 .dateline svg { color: var(--gold); }
 
-.ship-layout { display: grid; grid-template-columns: minmax(0, 1fr) 278px; gap: 17px; align-items: start; }
+main.page-width { container: board / inline-size; }
+.ship-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 17px; align-items: start; }
 .scene { position: sticky; top: 12px; isolation: isolate; container-type: inline-size; height: 568px; overflow: hidden; border: 1px solid #42606c; border-radius: 16px; background: #0c2734; box-shadow: 0 17px 40px #04101568; }
 .sea-art, .sea-vignette, .room-art { position: absolute; inset: 0; width: 100%; height: 100%; }
 .sea-art { background: url('/art/sea.webp') center 60% / cover; scale: 1.055; }
@@ -155,7 +156,6 @@ h1 { font: 700 clamp(36px, 4.4vw, 61px)/.93 var(--serif); margin: 0; }
 
 @media (max-width: 1100px) {
   .page-width { width: calc(100% - 46px); }
-  .ship-layout { grid-template-columns: minmax(0,1fr) 242px; gap: 13px; }
   .scene { height: 525px; }
   .ship { width: 87%; bottom: 7%; }
   .lesson-list { grid-template-columns: repeat(4,minmax(0,1fr)); }
@@ -169,7 +169,6 @@ h1 { font: 700 clamp(36px, 4.4vw, 61px)/.93 var(--serif); margin: 0; }
   .header-clock small { display: none; }
   main { padding-top: 23px; }
   .page-heading { align-items: start; flex-direction: column; gap: 8px; margin-bottom: 14px; }
-  .ship-layout { grid-template-columns: 1fr; }
   .scene { position: relative; top: auto; height: clamp(335px, 68vw, 500px); }
   .ship { width: min(87%, 590px); bottom: 7%; }
   .sidebar { grid-template-columns: 1fr 1fr; gap: 9px; }
@@ -178,6 +177,15 @@ h1 { font: 700 clamp(36px, 4.4vw, 61px)/.93 var(--serif); margin: 0; }
   .sidebar button { gap: 4px; padding-inline: 3px; font-size: 11px; }
   .sidebar button svg { width: 13px; }
   .member-location { font-size: 9px; }
+}
+@container board (min-width: 720px) {
+  .ship-layout { grid-template-columns: minmax(0, 1fr) 242px; gap: 13px; }
+}
+@container board (min-width: 1012px) {
+  .ship-layout { grid-template-columns: minmax(0, 1fr) 278px; gap: 17px; }
+}
+@container board (max-width: 719px) {
+  .scene { position: relative; top: auto; height: clamp(318px, 68cqw, 500px); }
 }
 @media (max-width: 460px) {
   .scene { height: 318px; }

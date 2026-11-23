@@ -1,0 +1,24 @@
+services:
+  caddy:
+    build:
+      context: .
+      target: caddy-proxy
+    image: schvopsel-caddy:local
+    profiles: ["proxy"]
+    environment:
+      CADDY_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-http://localhost}
+    ports:
+      - "${CADDY_BIND:-127.0.0.1}:${CADDY_HTTP_PORT:-8081}:80"
+      - "${CADDY_BIND:-127.0.0.1}:${CADDY_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:

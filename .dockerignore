@@ -1,0 +1,14 @@
+.git
+.playwright-mcp
+.DS_Store
+**/.DS_Store
+**/__pycache__
+**/node_modules
+**/dist
+.venv
+.env
+.env.*
+**/*.session
+**/*.session-*
+pre_assets
+tests

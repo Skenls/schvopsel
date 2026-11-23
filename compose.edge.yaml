@@ -1,0 +1,11 @@
+services:
+  app:
+    networks:
+      default: {}
+      edge:
+        aliases: [hamamton-app]
+
+networks:
+  edge:
+    external: true
+    name: ${CADDY_EXTERNAL_NETWORK:?Set CADDY_EXTERNAL_NETWORK}

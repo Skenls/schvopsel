@@ -1,0 +1,87 @@
+x-database-env: &database-env
+  PGHOST: db
+  PGDATABASE: ${POSTGRES_DB:-schvopsel}
+  PGUSER: ${POSTGRES_USER:-schvopsel}
+  PGPASSWORD: ${POSTGRES_PASSWORD:-local-demo}
+
+services:
+  app:
+    build: .
+    image: schvopsel:local
+    ports:
+      - "127.0.0.1:${PORT:-8080}:8000"
+    environment:
+      <<: *database-env
+      SCHEDULE_SOURCE: ${SCHEDULE_SOURCE:-}
+      MODE: ${mode:?Set mode=demo or mode=prod in .env}
+      MAIN_ADMIN_TELEGRAM_ID: ${MAIN_ADMIN_TELEGRAM_ID:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+  schedule-worker:
+    profiles: ["schedule"]
+    build:
+      context: .
+      target: schedule-worker
+    image: schvopsel-ocr:local
+    environment:
+      <<: *database-env
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_SESSION_PATH: /run/telegram/channel_listener.session
+      CHANNEL_USERNAME: ${CHANNEL_USERNAME:-}
+      CHANNEL_TARGET: ${CHANNEL_TARGET:-}
+      TARGET_GROUP: ${TARGET_GROUP:-11П}
+    volumes:
+      - type: bind
+        source: ${TELEGRAM_SESSION_PATH:-./channel_listener.session}
+        target: /run/telegram/channel_listener.session
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  telegram-bot:
+    profiles: ["bot"]
+    build:
+      context: .
+      target: telegram-bot
+    image: schvopsel-bot:local
+    environment:
+      <<: *database-env
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      MAIN_ADMIN_TELEGRAM_ID: ${MAIN_ADMIN_TELEGRAM_ID:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  db:
+    build:
+      context: .
+      target: database
+    image: schvopsel-db:local
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-schvopsel}
+      POSTGRES_USER: ${POSTGRES_USER:-schvopsel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-demo}
+    volumes:
+      - data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  data:

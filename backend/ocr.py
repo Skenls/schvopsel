@@ -53,8 +53,8 @@ class Transcription(BaseModel):
 
 
 class RoomRow(BaseModel):
-    number: int
-    subgroup: Literal[0, 1, 2]
+    number: int | None
+    kind: Literal["lesson", "tick"]
     room: str | None
 
 
@@ -241,8 +241,8 @@ def room_code(room: str | None) -> str:
     raise ValueError("Unrecognized room code")
 
 
-def lessons_from_rows(rows: list[Row]) -> list[dict]:
-    slots: dict[int, list[Row]] = {}
+def numbered_slots[T: (Row, RoomRow)](rows: list[T]) -> dict[int, list[T]]:
+    slots: dict[int, list[T]] = {}
     for row in rows:
         number = row.number
         if number is not None:
@@ -253,8 +253,12 @@ def lessons_from_rows(rows: list[Row]) -> list[dict]:
             slots[next(reversed(slots))].append(row)
         else:
             raise ValueError("Continuation row has no matching printed lesson")
+    return slots
+
+
+def lessons_from_rows(rows: list[Row]) -> list[dict]:
     lessons = []
-    for number, lines in slots.items():
+    for number, lines in numbered_slots(rows).items():
         for position, row in enumerate(lines, start=1):
             subject = " ".join((row.subject or "").split())
             if row.kind == "tick":
@@ -280,13 +284,12 @@ def verify_room_grid(lessons: list[dict], group: str, image: bytes, infer) -> li
 «№ гр.» и «№ ур», справа увеличена область с «Ауд». Строки обеих частей второго
 изображения лежат на одинаковой высоте. Читай каждую видимую цифру номера
 отдельно, даже если следующие друг за другом уроки имеют одинаковый кабинет.
-Сначала найди точную надпись группы. Для каждого занятия укажи напечатанный
-номер урока, subgroup (0 — единственная строка, 1 — верхняя, 2 — нижняя)
-и room из колонки «Ауд». Считывай цифры строго по горизонтали относительно
-верхней или нижней строки. Игнорируй текст предметов и преподавателей.
-Если следующий номер пуст, но есть строка занятия или галочка, это две
-подгруппы предыдущего номера. Урок напротив галочки отсутствует: саму
-галочку в результат не включай, но сохрани положение другой подгруппы.
+Сначала найди точную надпись группы. Перепиши физические строки сверху вниз.
+Одна запись соответствует одной видимой строке предмета или галочки.
+Для number перепиши только цифру из колонки «№ ур» на высоте этой строки.
+Если на этой высоте цифры нет, number=null; не повторяй номер сверху.
+Записывай галочку отдельной строкой с kind=tick. Для предмета ставь kind=lesson.
+Для room перепиши «Ауд» напротив этой строки. Не вычисляй номера подгрупп.
 У пустого кабинета room=null, у печатного «ч/з» верни «ч/з». «ч/з» может выглядеть
 как «9/3». Не копируй цифры из соседней строки и не придумывай пропущенный
 номер. Между разными номерами уроков нет группировки, даже если кабинет одинаков.
@@ -306,11 +309,15 @@ def verify_room_grid(lessons: list[dict], group: str, image: bytes, infer) -> li
     def checked_rooms(result):
         if not same_group(result.group_label, group):
             raise ValueError("RoomGrid did not identify the requested group")
-        rooms = {(row.number, row.subgroup): room_code(row.room) for row in result.rooms}
-        if rooms.keys() != expected or len(rooms) != len(result.rooms):
+        rooms = {
+            (number, position if len(lines) == 2 else 0): room_code(row.room)
+            for number, lines in numbered_slots(result.rooms).items()
+            for position, row in enumerate(lines, start=1) if row.kind == "lesson"
+        }
+        if rooms.keys() != expected:
             raise ValueError(
                 f"RoomGrid differs from transcription: missing {sorted(expected - rooms.keys())}, "
-                f"extra {sorted(rooms.keys() - expected)}, duplicates {len(result.rooms) - len(rooms)}"
+                f"extra {sorted(rooms.keys() - expected)}"
             )
         return rooms
 
@@ -441,9 +448,9 @@ class GeminiReader:
                     LOG.warning("Gemini %s (%s): обрыв связи", model, schema.__name__)
                 except ValidationError:
                     LOG.warning("Gemini %s (%s): некорректный ответ", model, schema.__name__)
-            if rejected is not None:
-                return rejected
             candidates = transient
+        if rejected is not None:
+            return rejected
         raise OCRUnavailable(
             f"Gemini не завершил этап {schema.__name__}",
             blocked=all(model in self.unavailable for model in self.models),

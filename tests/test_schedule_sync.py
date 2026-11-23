@@ -1,7 +1,8 @@
 import unittest
+from hashlib import sha256
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from backend.ocr import OCRUnavailable
 from backend.schedule_sync import PhotoReader, select_schedules
@@ -19,6 +20,23 @@ async def posts(*albums):
 
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reviewed_original_is_used_only_when_the_bytes_match(self):
+        raw = b"verified original"
+        reviewed = {
+            "42": {"sha256": sha256(raw).hexdigest(), "group": "11П", "day": str(TOMORROW),
+                   "rows": [[2, 0, "Физика", "502"]]},
+        }
+        photo = SimpleNamespace(id=42, download_media=AsyncMock(return_value=raw))
+        reader = PhotoReader("11П", None)
+        with (patch("backend.schedule_sync.REVIEWED_SHEETS", reviewed),
+              patch("backend.schedule_sync.locate_page", return_value=SimpleNamespace(day=TODAY, box=None)) as locate):
+            self.assertEqual(await reader.inspect(photo), (TOMORROW, True))
+            self.assertEqual(await reader.transcribe(photo), [LESSON])
+            locate.assert_not_called()
+            photo.download_media.return_value = b"different photo"
+            self.assertEqual(await PhotoReader("11П", None).inspect(photo), (TODAY, False))
+            locate.assert_called_once()
+
     async def test_unavailable_ocr_on_first_sheet_does_not_discard_album(self):
         inspect = AsyncMock(return_value=(TOMORROW, True))
         transcribe = AsyncMock(side_effect=[OCRUnavailable("busy"), [LESSON]])

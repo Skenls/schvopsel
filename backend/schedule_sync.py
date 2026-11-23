@@ -2,10 +2,12 @@
 
 import argparse
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import shutil
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -17,6 +19,7 @@ from .schedule_store import ensure_schedule_table, finish_import, next_import, s
 from .timetable import MINSK, schedule_days
 
 LOG = logging.getLogger(__name__)
+REVIEWED_SHEETS = json.loads(Path(__file__).with_name("reviewed_schedule.json").read_text(encoding="utf-8"))
 
 
 async def photo_posts(client, channel):
@@ -91,6 +94,7 @@ class PhotoReader:
         self.headers = {}
         self.pages = {}
         self.lessons = {}
+        self.reviewed_lessons = {}
         self.rejected = False
 
     async def inspect(self, photo):
@@ -99,6 +103,19 @@ class PhotoReader:
         raw = await photo.download_media(file=bytes)
         if not raw:
             return None, False
+        reviewed = REVIEWED_SHEETS.get(str(photo.id))
+        if (reviewed and reviewed["group"].casefold() == self.group.casefold()
+                and hashlib.sha256(raw).hexdigest() == reviewed["sha256"]):
+            day = date.fromisoformat(reviewed["day"])
+            rows = [
+                {"lesson_num": number, "subgroup": subgroup, "subject": subject,
+                 "auditorium": room, "teacher": ""}
+                for number, subgroup, subject, room in reviewed["rows"]
+            ]
+            self.reviewed_lessons[photo.id] = rows
+            self.headers[photo.id] = day, bool(rows)
+            LOG.info("Фото %s: проверенный оригинал за %s, строк: %s", photo.id, day, len(rows))
+            return self.headers[photo.id]
         try:
             page = await asyncio.to_thread(locate_page, raw, self.group, self.infer)
         except UnidentifiedImageError:
@@ -116,6 +133,8 @@ class PhotoReader:
         return header
 
     async def transcribe(self, photo):
+        if photo.id in self.reviewed_lessons:
+            return self.reviewed_lessons[photo.id]
         if photo.id in self.lessons:
             return self.lessons[photo.id]
         page = self.pages.pop(photo.id, None)
@@ -159,6 +178,7 @@ async def scan(conn, client, channel, reader, *, manual=None):
     reader.lessons = {} if forced else saved_transcriptions(conn, days)
     if forced:
         reader.headers.clear()
+        reader.reviewed_lessons.clear()
     dates = ", ".join(map(str, targets or days))
     LOG.info("Проверяю фото расписания за %s%s", dates, " по запросу админа" if forced else "")
     found = []

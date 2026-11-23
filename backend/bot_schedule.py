@@ -150,7 +150,7 @@ async def parse_schedule(message: Message, command: CommandObject, owner_id: int
     try:
         status = await message.answer("Ищу расписание в канале…")
         try:
-            async with asyncio.timeout(180):
+            async with asyncio.timeout(570):
                 while not (result := await asyncio.to_thread(check_import, job)):
                     await asyncio.sleep(4)
         except TimeoutError:

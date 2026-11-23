@@ -40,8 +40,8 @@ class OCRTests(unittest.TestCase):
     def test_schema_valid_but_unusable_transcription_and_grid_try_next_model(self):
         unusable = Transcription(group_label="11П", complete=False, rows=[])
         usable = Transcription(group_label="11П", complete=True, rows=[row(2, "Физика", None)])
-        wrong_grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=3, subgroup=0, room="404")])
-        matching_grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=2, subgroup=0, room="502")])
+        wrong_grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=3, kind="lesson", room="404")])
+        matching_grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=2, kind="lesson", room="502")])
         client = Mock()
         client.models.generate_content.side_effect = [
             SimpleNamespace(text=item.model_dump_json())
@@ -56,7 +56,7 @@ class OCRTests(unittest.TestCase):
     def test_crops_exact_group_and_rejects_wrong_group(self):
         wrong = Transcription(group_label="13П", complete=True, rows=[row(1, "Математика")])
         actual = Transcription(group_label="11п", complete=True, rows=[row(2, "Физика", "502")])
-        audit = RoomGrid(group_label="11П", rooms=[RoomRow(number=2, subgroup=0, room="502")])
+        audit = RoomGrid(group_label="11П", rooms=[RoomRow(number=2, kind="lesson", room="502")])
         mock = Mock(side_effect=[self.location, wrong, actual, audit])
         result = parse_image(self.image, "11П", mock)
         self.assertEqual(result["date"], "2026-11-23")
@@ -88,14 +88,14 @@ class OCRTests(unittest.TestCase):
     def test_subgroup_rooms_get_independent_check(self):
         lessons = lessons_from_rows([row(2, "Алгоритмизации", "305"), row(None, "Алгоритмизации", "305")])
         audit = RoomGrid(group_label="11П", rooms=[
-            RoomRow(number=2, subgroup=1, room="410"), RoomRow(number=2, subgroup=2, room="305"),
+            RoomRow(number=2, kind="lesson", room="410"), RoomRow(number=None, kind="lesson", room="305"),
         ])
         self.assertEqual([x["auditorium"] for x in verify_room_grid(lessons, "11П", self.image, Mock(return_value=audit))],
                          ["410", "305"])
 
     def test_unreadable_room_in_first_pass_uses_the_independent_grid(self):
         subject = Transcription(group_label="11П", complete=True, rows=[row(2, "Физика", "3/3")])
-        grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=2, subgroup=0, room="ч/з")])
+        grid = RoomGrid(group_label="11П", rooms=[RoomRow(number=2, kind="lesson", room="ч/з")])
         result = parse_image(self.image, "11П", Mock(side_effect=[self.location, subject, grid]))
         self.assertEqual(result["lessons"][0]["auditorium"], "ч/з")
 
@@ -144,3 +144,18 @@ class OCRTests(unittest.TestCase):
         wait.assert_called_once_with(2)
         self.assertEqual([call.kwargs["model"] for call in client.models.generate_content.call_args_list],
                          ["busy", "quota", "busy"])
+
+    def test_retry_transient_even_if_other_model_returned_unusable_rows(self):
+        client = Mock()
+        client.models.generate_content.side_effect = [
+            SimpleNamespace(text=self.location.model_copy(update={"group_label": None}).model_dump_json()),
+            ClientError(503, {"error": {"code": 503}}),
+            SimpleNamespace(text=self.location.model_dump_json()),
+        ]
+        def check(location):
+            if location.group_label is None:
+                raise ValueError("missing requested group")
+        with patch("backend.ocr.sleep") as wait:
+            result = GeminiReader(client, ("unusable", "busy"))(Location, "date", b"jpeg", check=check)
+        self.assertEqual(result, self.location)
+        wait.assert_called_once_with(2)

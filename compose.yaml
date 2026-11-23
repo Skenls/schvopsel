@@ -1,5 +1,5 @@
 x-database-env: &database-env
-  PGHOST: db
+  PGHOST: schvopsel-postgres
   PGDATABASE: ${POSTGRES_DB:-schvopsel}
   PGUSER: ${POSTGRES_USER:-schvopsel}
   PGPASSWORD: ${POSTGRES_PASSWORD:-local-demo}
@@ -71,6 +71,9 @@ services:
       context: .
       target: database
     image: schvopsel-db:local
+    networks:
+      default:
+        aliases: [schvopsel-postgres]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-schvopsel}
       POSTGRES_USER: ${POSTGRES_USER:-schvopsel}
